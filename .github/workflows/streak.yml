@@ -1,0 +1,21 @@
+name: streak
+on:
+  schedule:
+    - cron: "0 0 * * *"
+jobs:
+  auto:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v3
+
+      - name: run script
+        run: bash auto_commit.sh
+
+      - name: push
+        run: |
+          git config user.name "YOUR_NAME"
+          git config user.email "YOUR_EMAIL"
+          git add .
+          git commit -m "auto streak $(date)" || echo "nothing to commit"
+          git push
