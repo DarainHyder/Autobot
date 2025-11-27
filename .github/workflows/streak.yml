@@ -31,4 +31,3 @@ jobs:
           git commit -m "auto streak $(date)" || echo "nothing to commit"
 
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/DarainHyder/Autobot.git main
-
