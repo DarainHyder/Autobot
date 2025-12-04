@@ -1,9 +1,10 @@
+# .github/workflows/streak.yml
 name: streak
 
 on:
   schedule:
-    - cron: "0 18 * * *"   # once per day (18:00 UTC)
-  workflow_dispatch:
+    - cron: "0 0 * * *"   # every day at 00:00 UTC
+  workflow_dispatch:       # (optional) manual run button
 
 permissions:
   contents: write
