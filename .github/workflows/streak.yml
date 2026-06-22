@@ -3,11 +3,15 @@ name: streak
 
 on:
   schedule:
-    - cron: "0 1 * * *"   # 01:00 UTC
-    - cron: "0 7 * * *"   # 07:00 UTC
-    - cron: "0 13 * * *"  # 13:00 UTC
-    - cron: "0 19 * * *"  # 19:00 UTC
-  workflow_dispatch:       # manual run button (always commits)
+    - cron: "0 0 * * *"   # 00:00 UTC
+    - cron: "0 3 * * *"   # 03:00 UTC
+    - cron: "0 6 * * *"   # 06:00 UTC
+    - cron: "0 9 * * *"   # 09:00 UTC
+    - cron: "0 12 * * *"  # 12:00 UTC
+    - cron: "0 15 * * *"  # 15:00 UTC
+    - cron: "0 18 * * *"  # 18:00 UTC
+    - cron: "0 21 * * *"  # 21:00 UTC
+  workflow_dispatch:       # manual trigger — always commits
 
 permissions:
   contents: write
@@ -19,31 +23,99 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Roll the dice: 25% chance to commit on each scheduled run.
-      # workflow_dispatch (manual trigger) always commits.
+      # ─────────────────────────────────────────────────────────────
+      # CORE LOGIC
+      #
+      # We run 8 times a day (every 3 h). All 8 runs share the same
+      # day-hash, so they all independently reach the SAME decision
+      # about today without needing shared state.
+      #
+      # Day-hash mod 10:
+      #   0-3  →  skip day      (40% of days → 0 commits)
+      #   4-6  →  1 commit day  (30% of days)
+      #   7-8  →  2 commit day  (20% of days)
+      #   9    →  3 commit day  (10% of days)
+      #
+      # Which specific hour slots fire is also derived from the hash,
+      # so every run on the same day agrees on which hours are chosen.
+      # ─────────────────────────────────────────────────────────────
       - name: Decide whether to commit
-        id: roll
+        id: decide
         run: |
+          # Skip logic for scheduled runs; workflow_dispatch always commits
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "should_commit=true" >> $GITHUB_OUTPUT
-          else
-            # Random number 1-4; commit only if it equals 1 (25% chance)
-            ROLL=$(( (RANDOM % 4) + 1 ))
-            echo "Rolled: $ROLL"
-            if [ "$ROLL" -eq 1 ]; then
-              echo "should_commit=true" >> $GITHUB_OUTPUT
-            else
-              echo "should_commit=false" >> $GITHUB_OUTPUT
-              echo "Skipping this run."
-            fi
+            echo "Manual trigger — committing."
+            echo "should_commit=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
+          # Current UTC hour as integer (strip leading zero to avoid octal)
+          HOUR=$(date -u +%H | sed 's/^0//')
+          TODAY=$(date -u +%Y%m%d)
+
+          # Deterministic hash of today's date (same for every run today)
+          DAY_HASH=$(echo "$TODAY" | cksum | awk '{print $1}')
+          DAY_MOD=$(( DAY_HASH % 10 ))
+
+          echo "=== Day: $TODAY | Hash: $DAY_HASH | Mod: $DAY_MOD | Hour: $HOUR ==="
+
+          # ── Step 1: Is today a commit day? ──────────────────────
+          if [ "$DAY_MOD" -le 3 ]; then
+            echo "SKIP DAY — no commits scheduled today."
+            echo "should_commit=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ── Step 2: How many commits today? ─────────────────────
+          if   [ "$DAY_MOD" -le 6 ]; then NUM_COMMITS=1
+          elif [ "$DAY_MOD" -le 8 ]; then NUM_COMMITS=2
+          else                             NUM_COMMITS=3
+          fi
+          echo "Commit day — target commits: $NUM_COMMITS"
+
+          # ── Step 3: Pick which hour slots commit ─────────────────
+          # All 8 available slots (must match the cron schedule above)
+          ALL_SLOTS=(0 3 6 9 12 15 18 21)
+
+          # Secondary hash to choose slots (different from day-type hash)
+          SLOT_SEED=$(echo "${TODAY}slots" | cksum | awk '{print $1}')
+
+          SELECTED=()
+          POOL=("${ALL_SLOTS[@]}")
+
+          for i in $(seq 1 "$NUM_COMMITS"); do
+            LEN=${#POOL[@]}
+            IDX=$(( (SLOT_SEED * i * 7 + i * 7919) % LEN ))
+            SELECTED+=( "${POOL[$IDX]}" )
+            # Remove chosen slot from pool to avoid duplicates
+            POOL=( "${POOL[@]:0:$IDX}" "${POOL[@]:$((IDX+1))}" )
+          done
+
+          echo "Selected commit hour(s) UTC: ${SELECTED[*]}"
+
+          # ── Step 4: Does this run's hour match a selected slot? ──
+          SHOULD_COMMIT=false
+          for h in "${SELECTED[@]}"; do
+            if [ "$HOUR" -eq "$h" ]; then
+              SHOULD_COMMIT=true
+              break
+            fi
+          done
+
+          if [ "$SHOULD_COMMIT" = "true" ]; then
+            echo "✅ This slot is selected — will commit."
+          else
+            echo "⏭  This slot not selected — skipping."
+          fi
+
+          echo "should_commit=$SHOULD_COMMIT" >> "$GITHUB_OUTPUT"
+
       - name: Update daily file
-        if: steps.roll.outputs.should_commit == 'true'
+        if: steps.decide.outputs.should_commit == 'true'
         run: echo "$(date -u)" >> daily.txt
 
       - name: Commit & push
-        if: steps.roll.outputs.should_commit == 'true'
+        if: steps.decide.outputs.should_commit == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
