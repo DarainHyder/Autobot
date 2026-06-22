@@ -3,8 +3,11 @@ name: streak
 
 on:
   schedule:
-    - cron: "0 0 * * *"   # every day at 00:00 UTC
-  workflow_dispatch:       # (optional) manual run button
+    - cron: "0 1 * * *"   # 01:00 UTC
+    - cron: "0 7 * * *"   # 07:00 UTC
+    - cron: "0 13 * * *"  # 13:00 UTC
+    - cron: "0 19 * * *"  # 19:00 UTC
+  workflow_dispatch:       # manual run button (always commits)
 
 permissions:
   contents: write
@@ -16,10 +19,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Roll the dice: 25% chance to commit on each scheduled run.
+      # workflow_dispatch (manual trigger) always commits.
+      - name: Decide whether to commit
+        id: roll
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_commit=true" >> $GITHUB_OUTPUT
+          else
+            # Random number 1-4; commit only if it equals 1 (25% chance)
+            ROLL=$(( (RANDOM % 4) + 1 ))
+            echo "Rolled: $ROLL"
+            if [ "$ROLL" -eq 1 ]; then
+              echo "should_commit=true" >> $GITHUB_OUTPUT
+            else
+              echo "should_commit=false" >> $GITHUB_OUTPUT
+              echo "Skipping this run."
+            fi
+          fi
+
       - name: Update daily file
+        if: steps.roll.outputs.should_commit == 'true'
         run: echo "$(date -u)" >> daily.txt
 
       - name: Commit & push
+        if: steps.roll.outputs.should_commit == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
