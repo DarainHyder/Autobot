@@ -1,17 +1,16 @@
 # .github/workflows/streak.yml
 name: streak
 
+# Runs 4x per day. On "active" days, exactly ONE slot is chosen
+# for the commit (natural-looking time variation).
+# On "inactive" days, all 4 runs silently skip.
 on:
   schedule:
-    - cron: "0 0 * * *"   # 00:00 UTC
-    - cron: "0 3 * * *"   # 03:00 UTC
-    - cron: "0 6 * * *"   # 06:00 UTC
-    - cron: "0 9 * * *"   # 09:00 UTC
-    - cron: "0 12 * * *"  # 12:00 UTC
-    - cron: "0 15 * * *"  # 15:00 UTC
-    - cron: "0 18 * * *"  # 18:00 UTC
-    - cron: "0 21 * * *"  # 21:00 UTC
-  workflow_dispatch:       # manual trigger — always commits
+    - cron: "0 6  * * *"   # 06:00 UTC
+    - cron: "0 10 * * *"   # 10:00 UTC
+    - cron: "0 14 * * *"   # 14:00 UTC
+    - cron: "0 18 * * *"   # 18:00 UTC
+  workflow_dispatch:         # manual trigger — always commits
 
 permissions:
   contents: write
@@ -23,92 +22,87 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ─────────────────────────────────────────────────────────────
-      # CORE LOGIC
+      # ═══════════════════════════════════════════════════════════════
+      # 3-WEEK ROTATING SCHEDULE (loops forever)
       #
-      # We run 8 times a day (every 3 h). All 8 runs share the same
-      # day-hash, so they all independently reach the SAME decision
-      # about today without needing shared state.
+      #   ISO week number mod 3 → which pattern:
+      #     0  →  Week A: Mon Tue Wed Thu  (Mon=1 Tue=2 Wed=3 Thu=4)
+      #     1  →  Week B: Wed Thu
+      #     2  →  Week C: Mon Wed
       #
-      # Day-hash mod 10:
-      #   0-3  →  skip day      (40% of days → 0 commits)
-      #   4-6  →  1 commit day  (30% of days)
-      #   7-8  →  2 commit day  (20% of days)
-      #   9    →  3 commit day  (10% of days)
-      #
-      # Which specific hour slots fire is also derived from the hash,
-      # so every run on the same day agrees on which hours are chosen.
-      # ─────────────────────────────────────────────────────────────
+      # On an active day, pick exactly ONE of the 4 daily cron slots
+      # using a date-based deterministic hash (same slot chosen by all
+      # 4 runs on the same day → no double commits).
+      # ═══════════════════════════════════════════════════════════════
       - name: Decide whether to commit
         id: decide
         run: |
-          # Skip logic for scheduled runs; workflow_dispatch always commits
+          # ── Manual trigger always commits ─────────────────────────
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Manual trigger — committing."
             echo "should_commit=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Current UTC hour as integer (strip leading zero to avoid octal)
-          HOUR=$(date -u +%H | sed 's/^0//')
+          # ── Gather date info ──────────────────────────────────────
+          DOW=$(date -u +%u)          # Day of week: 1=Mon … 7=Sun
+          WEEK_NUM=$(date -u +%V)     # ISO week number 01-53
+          HOUR=$(date -u +%H | sed 's/^0//')  # Current UTC hour (no leading zero)
           TODAY=$(date -u +%Y%m%d)
 
-          # Deterministic hash of today's date (same for every run today)
-          DAY_HASH=$(echo "$TODAY" | cksum | awk '{print $1}')
-          DAY_MOD=$(( DAY_HASH % 10 ))
+          CYCLE=$(( 10#$WEEK_NUM % 3 ))
 
-          echo "=== Day: $TODAY | Hash: $DAY_HASH | Mod: $DAY_MOD | Hour: $HOUR ==="
+          echo "══════════════════════════════════════"
+          echo "Date   : $TODAY"
+          echo "DOW    : $DOW  (1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat 7=Sun)"
+          echo "Week # : $WEEK_NUM  →  Cycle: $CYCLE"
+          echo "Hour   : ${HOUR}:00 UTC"
+          echo "══════════════════════════════════════"
 
-          # ── Step 1: Is today a commit day? ──────────────────────
-          if [ "$DAY_MOD" -le 3 ]; then
-            echo "SKIP DAY — no commits scheduled today."
+          # ── Is today an active day? ───────────────────────────────
+          ACTIVE=false
+
+          if [ "$CYCLE" -eq 0 ]; then
+            # Week A: Monday(1) Tuesday(2) Wednesday(3) Thursday(4)
+            echo "Pattern: Week A — Mon Tue Wed Thu"
+            if [ "$DOW" -le 4 ]; then ACTIVE=true; fi
+
+          elif [ "$CYCLE" -eq 1 ]; then
+            # Week B: Wednesday(3) Thursday(4)
+            echo "Pattern: Week B — Wed Thu"
+            if [ "$DOW" -eq 3 ] || [ "$DOW" -eq 4 ]; then ACTIVE=true; fi
+
+          else
+            # Week C: Monday(1) Wednesday(3)
+            echo "Pattern: Week C — Mon Wed"
+            if [ "$DOW" -eq 1 ] || [ "$DOW" -eq 3 ]; then ACTIVE=true; fi
+          fi
+
+          if [ "$ACTIVE" = "false" ]; then
+            echo "⏭  Not an active day — skipping."
             echo "should_commit=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # ── Step 2: How many commits today? ─────────────────────
-          if   [ "$DAY_MOD" -le 6 ]; then NUM_COMMITS=1
-          elif [ "$DAY_MOD" -le 8 ]; then NUM_COMMITS=2
-          else                             NUM_COMMITS=3
-          fi
-          echo "Commit day — target commits: $NUM_COMMITS"
+          echo "✅ Active day!"
 
-          # ── Step 3: Pick which hour slots commit ─────────────────
-          # All 8 available slots (must match the cron schedule above)
-          ALL_SLOTS=(0 3 6 9 12 15 18 21)
+          # ── Pick exactly ONE slot for today's commit ──────────────
+          # Deterministic hash of today's date so all 4 runs agree
+          DAY_HASH=$(echo "$TODAY" | cksum | awk '{print $1}')
+          AVAILABLE_SLOTS=(6 10 14 18)
+          NUM_SLOTS=${#AVAILABLE_SLOTS[@]}
+          CHOSEN_IDX=$(( DAY_HASH % NUM_SLOTS ))
+          CHOSEN_HOUR=${AVAILABLE_SLOTS[$CHOSEN_IDX]}
 
-          # Secondary hash to choose slots (different from day-type hash)
-          SLOT_SEED=$(echo "${TODAY}slots" | cksum | awk '{print $1}')
+          echo "Chosen commit slot: ${CHOSEN_HOUR}:00 UTC  (current: ${HOUR}:00 UTC)"
 
-          SELECTED=()
-          POOL=("${ALL_SLOTS[@]}")
-
-          for i in $(seq 1 "$NUM_COMMITS"); do
-            LEN=${#POOL[@]}
-            IDX=$(( (SLOT_SEED * i * 7 + i * 7919) % LEN ))
-            SELECTED+=( "${POOL[$IDX]}" )
-            # Remove chosen slot from pool to avoid duplicates
-            POOL=( "${POOL[@]:0:$IDX}" "${POOL[@]:$((IDX+1))}" )
-          done
-
-          echo "Selected commit hour(s) UTC: ${SELECTED[*]}"
-
-          # ── Step 4: Does this run's hour match a selected slot? ──
-          SHOULD_COMMIT=false
-          for h in "${SELECTED[@]}"; do
-            if [ "$HOUR" -eq "$h" ]; then
-              SHOULD_COMMIT=true
-              break
-            fi
-          done
-
-          if [ "$SHOULD_COMMIT" = "true" ]; then
-            echo "✅ This slot is selected — will commit."
+          if [ "$HOUR" -eq "$CHOSEN_HOUR" ]; then
+            echo "🟢 This is the chosen slot — committing!"
+            echo "should_commit=true" >> "$GITHUB_OUTPUT"
           else
-            echo "⏭  This slot not selected — skipping."
+            echo "⏭  Not the chosen slot — skipping this run."
+            echo "should_commit=false" >> "$GITHUB_OUTPUT"
           fi
-
-          echo "should_commit=$SHOULD_COMMIT" >> "$GITHUB_OUTPUT"
 
       - name: Update daily file
         if: steps.decide.outputs.should_commit == 'true'
